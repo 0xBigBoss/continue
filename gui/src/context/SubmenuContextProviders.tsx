@@ -48,9 +48,12 @@ export const SubmenuContextProvidersProvider = ({
 }) => {
   const [mounted, setMounted] = useState(false);
   const [fetching, setFetching] = useState(false);
-  // Use useRef for mutable objects that shouldn't trigger re-renders
-  const minisearchesRef = useRef<{ [id: string]: MiniSearch }>({});
-  const fallbackResultsRef = useRef<{ [id: string]: ContextSubmenuItem[] }>({});
+  const [minisearches, setMinisearches] = useState<{
+    [id: string]: MiniSearch;
+  }>({});
+  const [fallbackResults, setFallbackResults] = useState<{
+    [id: string]: ContextSubmenuItem[];
+  }>({});
 
   const contextProviderDescriptions = useSelector(
     selectContextProviderDescriptions,
@@ -82,7 +85,7 @@ export const SubmenuContextProvidersProvider = ({
   useWebviewListener("refreshSubmenuItems", async () => {
     if (!isLoading) {
       setInitialLoadComplete(false);
-      setAutoLoadTriggered((prev) => !prev);
+      setAutoLoadTriggered((prev) => !prev); // Toggle to trigger effect
     }
   });
 
@@ -93,29 +96,33 @@ export const SubmenuContextProvidersProvider = ({
     });
 
     minisearch.addAll(data.submenuItems);
-    minisearchesRef.current[data.provider] = minisearch;
+    setMinisearches((prev) => ({ ...prev, [data.provider]: minisearch }));
 
     if (data.provider === "file") {
       const openFiles = await getOpenFilesItems();
-      fallbackResultsRef.current[data.provider] = [
-        ...openFiles,
-        ...data.submenuItems.slice(0, MAX_LENGTH - openFiles.length),
-      ];
+      setFallbackResults((prev) => ({
+        ...prev,
+        file: [
+          ...openFiles,
+          ...data.submenuItems.slice(0, MAX_LENGTH - openFiles.length),
+        ],
+      }));
     } else {
-      fallbackResultsRef.current[data.provider] = data.submenuItems.slice(
-        0,
-        MAX_LENGTH,
-      );
+      setFallbackResults((prev) => ({
+        ...prev,
+        [data.provider]: data.submenuItems.slice(0, MAX_LENGTH),
+      }));
     }
   });
 
   const addItem = useCallback(
     (providerTitle: string, item: ContextSubmenuItem) => {
-      const minisearch = minisearchesRef.current[providerTitle];
-      if (!minisearch) return;
-      minisearch.add(item);
+      if (!minisearches[providerTitle]) {
+        return;
+      }
+      minisearches[providerTitle].add(item);
     },
-    [],
+    [minisearches],
   );
 
   useEffect(() => {
@@ -128,92 +135,110 @@ export const SubmenuContextProvidersProvider = ({
       setFetching(true);
       try {
         const openFiles = await getOpenFilesItems();
-        const currentFiles = fallbackResultsRef.current.file || [];
+        const currentFiles = fallbackResults.file || [];
         for (const file of currentFiles) {
           if (!openFiles.some((openFile) => openFile.id === file.id)) {
             openFiles.push({ ...file, providerTitle: "file" });
           }
         }
-        fallbackResultsRef.current.file = deduplicateArray(
+        fallbackResults.file = deduplicateArray(
           openFiles,
           (a, b) => a.id === b.id,
         );
+        setFallbackResults(fallbackResults);
       } finally {
         setFetching(false);
       }
     };
     const interval = setInterval(refreshOpenFiles, 2000);
-    refreshOpenFiles();
+
+    refreshOpenFiles(); // Initial call\
+
     return () => {
       setMounted(false);
       clearInterval(interval);
     };
   }, []);
 
-  const getSubmenuSearchResults = useCallback(
-    (providerTitle: string | undefined, query: string): SearchResult[] => {
-      if (providerTitle === undefined) {
-        const results: SearchResult[] = [];
-        Object.entries(minisearchesRef.current).forEach(
-          ([provider, minisearch]) => {
-            const searchResults = minisearch.search(query, MINISEARCH_OPTIONS);
-            searchResults.forEach((result) => {
-              results.push({ ...result, providerTitle: provider });
+  const getSubmenuSearchResults = useMemo(
+    () =>
+      (providerTitle: string | undefined, query: string): SearchResult[] => {
+        if (providerTitle === undefined) {
+          // Return search combined from all providers
+          const results = Object.keys(minisearches).map((providerTitle) => {
+            const results = minisearches[providerTitle].search(
+              query,
+              MINISEARCH_OPTIONS,
+            );
+            return results.map((result) => {
+              return { ...result, providerTitle };
             });
-          },
-        );
-        results.sort((a, b) => b.score - a.score);
-        return results;
-      }
+          });
 
-      const minisearch = minisearchesRef.current[providerTitle];
-      if (!minisearch) return [];
-
-      return minisearch
-        .search(query, MINISEARCH_OPTIONS)
-        .map((result) => ({ ...result, providerTitle }));
-    },
-    [],
-  );
-
-  const getSubmenuContextItems = useCallback(
-    (
-      providerTitle: string | undefined,
-      query: string,
-      limit: number = MAX_LENGTH,
-    ): (ContextSubmenuItem & { providerTitle: string })[] => {
-      try {
-        const results = getSubmenuSearchResults(providerTitle, query);
-        if (results.length === 0) {
-          const fallbackItems = fallbackResultsRef.current[providerTitle] || [];
-          if (fallbackItems.length === 0 && !initialLoadComplete) {
-            return [
-              {
-                id: "loading",
-                title: "Loading...",
-                description: "Please wait while items are being loaded",
-                providerTitle: providerTitle || "unknown",
-              },
-            ];
-          }
-          return fallbackItems.slice(0, limit).map((result) => ({
-            ...result,
-            providerTitle,
-          }));
+          return results.flat().sort((a, b) => b.score - a.score);
+        }
+        if (!minisearches[providerTitle]) {
+          return [];
         }
 
-        return results.slice(0, limit).map((result) => ({
-          id: result.id,
-          title: result.title,
-          description: result.description,
-          providerTitle: result.providerTitle,
-        }));
-      } catch (error) {
-        console.error("Error in getSubmenuContextItems:", error);
-        return [];
-      }
-    },
-    [getSubmenuSearchResults, initialLoadComplete],
+        const results = minisearches[providerTitle]
+          .search(query, MINISEARCH_OPTIONS)
+          .map((result) => {
+            return { ...result, providerTitle };
+          });
+
+        return results;
+      },
+    [minisearches],
+  );
+
+  const getSubmenuContextItems = useMemo(
+    () =>
+      (
+        providerTitle: string | undefined,
+        query: string,
+        limit: number = MAX_LENGTH,
+      ): (ContextSubmenuItem & { providerTitle: string })[] => {
+        try {
+          const results = getSubmenuSearchResults(providerTitle, query);
+          if (results.length === 0) {
+            const fallbackItems = (fallbackResults[providerTitle] ?? [])
+              .slice(0, limit)
+              .map((result) => {
+                return {
+                  ...result,
+                  providerTitle,
+                };
+              });
+
+            if (fallbackItems.length === 0 && !initialLoadComplete) {
+              return [
+                {
+                  id: "loading",
+                  title: "Loading...",
+                  description: "Please wait while items are being loaded",
+                  providerTitle: providerTitle || "unknown",
+                },
+              ];
+            }
+
+            return fallbackItems;
+          }
+          const limitedResults = results.slice(0, limit).map((result) => {
+            return {
+              id: result.id,
+              title: result.title,
+              description: result.description,
+              providerTitle: result.providerTitle,
+            };
+          });
+          return limitedResults;
+        } catch (error) {
+          console.error("Error in getSubmenuContextItems:", error);
+          return [];
+        }
+      },
+    [fallbackResults, getSubmenuSearchResults, initialLoadComplete],
   );
 
   useEffect(() => {
@@ -259,34 +284,23 @@ export const SubmenuContextProvidersProvider = ({
               const items = result.content;
 
               minisearch.addAll(items);
-              minisearchesRef.current[description.title] = minisearch;
-              // setMinisearches((prev) => ({
-              //   ...prev,
-              //   [description.title]: minisearch,
-              // }));
+              minisearches[description.title] = minisearch;
+              setMinisearches(minisearches);
 
               if (description.title === "file") {
                 const openFiles = await getOpenFilesItems();
-                // setFallbackResults((prev) => ({
-                //   ...prev,
-                //   file: [
-                //     ...openFiles,
-                //     ...items.slice(0, MAX_LENGTH - openFiles.length),
-                //   ],
-                // }));
-                fallbackResultsRef.current.file = [
-                  ...openFiles,
-                  ...items.slice(0, MAX_LENGTH - openFiles.length),
-                ];
+                setFallbackResults((prev) => ({
+                  ...prev,
+                  file: [
+                    ...openFiles,
+                    ...items.slice(0, MAX_LENGTH - openFiles.length),
+                  ],
+                }));
               } else {
-                // setFallbackResults((prev) => ({
-                //   ...prev,
-                //   [description.title]: items.slice(0, MAX_LENGTH),
-                // }));
-                fallbackResultsRef.current[description.title] = items.slice(
-                  0,
-                  MAX_LENGTH,
-                );
+                setFallbackResults((prev) => ({
+                  ...prev,
+                  [description.title]: items.slice(0, MAX_LENGTH),
+                }));
               }
             } catch (error) {
               console.error(`Error processing ${description.title}:`, error);
