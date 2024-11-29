@@ -262,15 +262,20 @@ export function deduplicateArray<T>(
   array: T[],
   equal: (a: T, b: T) => boolean,
 ): T[] {
-  const result: T[] = [];
-
-  for (const item of array) {
-    if (!result.some((existingItem) => equal(existingItem, item))) {
-      result.push(item);
+  if (array.length === 0) {
+    return array;
+  }
+  for (let i = 0; i < array.length; i++) {
+    const item = array[i];
+    for (let j = i + 1; j < array.length; j++) {
+      const otherItem = array[j];
+      if (equal(item, otherItem)) {
+        array.splice(j, 1);
+        j--;
+      }
     }
   }
-
-  return result;
+  return array;
 }
 
 export type TODO = any;
